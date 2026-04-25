@@ -7,6 +7,7 @@
 已完成第一版因子检测代码骨架、配置、真实数据入库、DB 驱动流程和 Agent 挖因子后端受控执行链路；UI 已从最小可用界面向 `ui/agent_factor_ui_overview.png` 收敛。
 
 ## 最近关键决定
+- 已完成仓库初始化：新增 `.gitignore`、创建首个 commit，并推送到 GitHub 仓库 `yangxiamike/crypto-factor-research-project`（`main` 分支）。
 - 新增 `AGENT_FACTOR_MINING_ROADMAP.md`，作为后续 Agent 挖因子系统的路线方案文档。
 - Agent 挖因子路线采用分阶段推进：先让 Agent 做研究助理，再做半自动研究循环，最后再考虑搜索/RL 自进化。
 - 第一版不训练 RL，不让 Agent 直接执行任意 Python；先输出结构化因子任务，由人确认后交给现有因子检测系统。
