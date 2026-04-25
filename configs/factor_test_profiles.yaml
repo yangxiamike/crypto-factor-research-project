@@ -1,0 +1,28 @@
+test_config_version: v0.1
+profiles:
+  raw:
+    description: Raw signal without neutralization.
+    neutralize_exposures: []
+    within_category: false
+  base_neutral:
+    description: Neutralize beta, size and liquidity exposures.
+    neutralize_exposures:
+      - beta
+      - size
+      - liquidity
+    within_category: false
+  strict_neutral:
+    description: Neutralize base exposures plus volatility, age and category.
+    neutralize_exposures:
+      - beta
+      - size
+      - liquidity
+      - volatility
+      - age
+      - primary_category
+    within_category: false
+  within_category:
+    description: Evaluate signals within primary_category groups.
+    neutralize_exposures: []
+    within_category: true
+    group_by: primary_category

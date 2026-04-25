@@ -1,0 +1,655 @@
+from __future__ import annotations
+
+from copy import deepcopy
+from typing import Any
+
+# Agent 挖因子主流程状态口径（页面徽标、筛选、状态机文案统一使用）
+STATUS_CATALOG: dict[str, dict[str, Any]] = {
+    "waiting_input": {
+        "label": "等待输入",
+        "group": "准备中",
+        "color": "#A0AEC0",
+        "icon": "📝",
+        "description": "等待研究员提交目标或补充约束。",
+    },
+    "agent_generating": {
+        "label": "Agent 生成中",
+        "group": "执行中",
+        "color": "#5B8FF9",
+        "icon": "✨",
+        "description": "Agent 正在拆解目标并生成候选任务。",
+    },
+    "pending_review": {
+        "label": "待审核",
+        "group": "待确认",
+        "color": "#F6BD16",
+        "icon": "🧾",
+        "description": "候选任务已生成，等待人工审核。",
+    },
+    "running": {
+        "label": "执行中",
+        "group": "执行中",
+        "color": "#13C2C2",
+        "icon": "⚙️",
+        "description": "任务已通过审核，进入批量回测与评估。",
+    },
+    "approved": {
+        "label": "审核通过",
+        "group": "已通过",
+        "color": "#52C41A",
+        "icon": "✅",
+        "description": "任务通过人工审核，可入执行队列。",
+    },
+    "rejected": {
+        "label": "审核拒绝",
+        "group": "已关闭",
+        "color": "#FF4D4F",
+        "icon": "⛔",
+        "description": "候选任务不满足研究或风控要求。",
+    },
+    "blocked": {
+        "label": "已阻塞",
+        "group": "异常",
+        "color": "#FA8C16",
+        "icon": "🚧",
+        "description": "受数据缺失或依赖限制，任务暂不可执行。",
+    },
+    "in_library": {
+        "label": "已入库",
+        "group": "产出",
+        "color": "#52C41A",
+        "icon": "📚",
+        "description": "因子通过验收并入库，可供组合复用。",
+    },
+    "in_monitoring": {
+        "label": "监控中",
+        "group": "产出",
+        "color": "#722ED1",
+        "icon": "🔔",
+        "description": "因子已上线，持续监控衰减和漂移。",
+    },
+}
+
+WORKFLOW_STEPS: list[dict[str, Any]] = [
+    {
+        "step_no": 1,
+        "step_key": "define_goal",
+        "step_name": "提出目标",
+        "owner": "研究员",
+        "input": "研究主题、市场范围、收益/风险约束",
+        "output": "结构化研究目标卡片",
+        "current_status": "approved",
+    },
+    {
+        "step_no": 2,
+        "step_key": "task_decompose",
+        "step_name": "Agent 拆解任务",
+        "owner": "Agent",
+        "input": "目标卡片 + 历史实验记忆",
+        "output": "可执行候选任务列表",
+        "current_status": "running",
+    },
+    {
+        "step_no": 3,
+        "step_key": "fetch_data",
+        "step_name": "拉取数据",
+        "owner": "数据层",
+        "input": "required_fields 与时间窗口",
+        "output": "字段可得性检查结果",
+        "current_status": "running",
+    },
+    {
+        "step_no": 4,
+        "step_key": "generate_candidates",
+        "step_name": "生成候选因子",
+        "owner": "Agent",
+        "input": "通过可得性校验的数据字段",
+        "output": "formula_key + formula_params 候选集",
+        "current_status": "pending_review",
+    },
+    {
+        "step_no": 5,
+        "step_key": "batch_backtest",
+        "step_name": "批量回测",
+        "owner": "回测引擎",
+        "input": "审核通过的任务",
+        "output": "IC、分层收益、换手与风险标签",
+        "current_status": "waiting_input",
+    },
+    {
+        "step_no": 6,
+        "step_key": "manual_review",
+        "step_name": "人工审核",
+        "owner": "研究员",
+        "input": "回测结果与归因报告",
+        "output": "通过/拒绝/补充实验意见",
+        "current_status": "waiting_input",
+    },
+    {
+        "step_no": 7,
+        "step_key": "library_and_portfolio",
+        "step_name": "入库/组合",
+        "owner": "组合经理",
+        "input": "审核通过因子",
+        "output": "因子库条目与组合配置",
+        "current_status": "waiting_input",
+    },
+    {
+        "step_no": 8,
+        "step_key": "monitor_iterate",
+        "step_name": "监控迭代",
+        "owner": "监控系统",
+        "input": "已上线因子表现",
+        "output": "衰减告警与重跑建议",
+        "current_status": "waiting_input",
+    },
+]
+
+TOP_STATUS_CHIPS: list[dict[str, Any]] = [
+    {
+        "chip_key": "progress_tasks",
+        "label": "任务进度",
+        "value": "8/12 任务",
+        "status": "running",
+        "icon": "🧩",
+        "description": "已完成 8 个子任务，剩余 4 个待推进。",
+    },
+    {
+        "chip_key": "candidate_total",
+        "label": "候选因子",
+        "value": "36",
+        "status": "agent_generating",
+        "icon": "🧪",
+        "description": "当前轮次累计生成 36 个候选因子草案。",
+    },
+    {
+        "chip_key": "data_validation",
+        "label": "数据验证",
+        "value": "83%",
+        "status": "pending_review",
+        "icon": "🛡️",
+        "description": "字段可得性、PIT 与缺数检查综合通过率 83%。",
+    },
+    {
+        "chip_key": "library_ready",
+        "label": "可入库",
+        "value": "6",
+        "status": "approved",
+        "icon": "📦",
+        "description": "6 个候选达到当前验收线，等待人工最终确认。",
+    },
+]
+
+RESEARCH_OBJECTIVE: dict[str, Any] = {
+    "objective_id": "OBJ-20260425-001",
+    "title": "挖掘 BTC/ETH/SOL/BNB 短中周期反转与流动性共振因子",
+    "universe": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"],
+    "frequency": "1h",
+    "horizons": ["4h", "12h", "24h"],
+    "return_definition": "future_vwap_return",
+    "neutralization_profile": "strict_neutral",
+    "risk_preference": "中等",
+    "acceptance_rule_version": "v1.0",
+    "note": "优先复用现有白名单公式，降低自由公式执行风险。",
+}
+
+TASK_BREAKDOWN: list[dict[str, Any]] = [
+    {
+        "task_id": "TASK-240425-01",
+        "factor_name": "短期过热回落强度",
+        "hypothesis": "短时拉升后出现成交量背离，后续 4-12h 回撤概率上升。",
+        "required_fields": ["close", "volume", "high", "low"],
+        "formula_draft": "(close / SMA(close, 12) - 1) * zscore(volume, 24)",
+        "formula_key": "price_volume_reversal_v1",
+        "formula_params": {"price_lookback": 12, "volume_lookback": 24},
+        "direction": "short",
+        "horizons": ["4h", "12h"],
+        "neutralization_profile": "strict_neutral",
+        "risk_checks": ["turnover_cap", "single_exchange_exposure"],
+        "acceptance_rule_version": "v1.0",
+        "status": "approved",
+        "priority": "P1",
+        "owner_agent": "agent-alpha",
+        "data_readiness": "ready",
+    },
+    {
+        "task_id": "TASK-240425-02",
+        "factor_name": "资金费率拥挤反转",
+        "hypothesis": "资金费率持续偏高代表多头拥挤，随后收益反转概率提升。",
+        "required_fields": ["funding_rate", "open_interest", "close"],
+        "formula_draft": "zscore(funding_rate, 72) * zscore(delta(open_interest), 24)",
+        "formula_key": "funding_oi_crowding_v1",
+        "formula_params": {"funding_lookback": 72, "oi_delta_lookback": 24},
+        "direction": "short",
+        "horizons": ["12h", "24h"],
+        "neutralization_profile": "base_neutral",
+        "risk_checks": ["point_in_time_check", "liquidation_shock_filter"],
+        "acceptance_rule_version": "v1.0",
+        "status": "blocked",
+        "priority": "P1",
+        "owner_agent": "agent-beta",
+        "data_readiness": "missing_open_interest",
+    },
+    {
+        "task_id": "TASK-240425-03",
+        "factor_name": "盘口失衡惯性",
+        "hypothesis": "买卖盘失衡在低波动区间更易延续到下一交易窗。",
+        "required_fields": ["orderbook_bid_ask_ratio", "close", "realized_vol"],
+        "formula_draft": "EMA(orderbook_bid_ask_ratio, 6) / (1 + realized_vol)",
+        "formula_key": "orderbook_imbalance_momentum_v1",
+        "formula_params": {"ema_window": 6, "vol_window": 24},
+        "direction": "long",
+        "horizons": ["4h"],
+        "neutralization_profile": "raw",
+        "risk_checks": ["depth_quality_check"],
+        "acceptance_rule_version": "v1.0",
+        "status": "pending_review",
+        "priority": "P2",
+        "owner_agent": "agent-gamma",
+        "data_readiness": "partial",
+    },
+    {
+        "task_id": "TASK-240425-04",
+        "factor_name": "链上活跃度错位",
+        "hypothesis": "链上活跃地址与价格走势出现背离时存在均值回归机会。",
+        "required_fields": ["active_addresses", "close", "tx_count"],
+        "formula_draft": "zscore(active_addresses, 48) - zscore(close, 48)",
+        "formula_key": "onchain_activity_divergence_v1",
+        "formula_params": {"lookback": 48},
+        "direction": "long_short",
+        "horizons": ["24h"],
+        "neutralization_profile": "within_category",
+        "risk_checks": ["source_latency_check", "point_in_time_check"],
+        "acceptance_rule_version": "v1.0",
+        "status": "agent_generating",
+        "priority": "P3",
+        "owner_agent": "agent-delta",
+        "data_readiness": "checking",
+    },
+]
+
+CANDIDATE_FACTORS: list[dict[str, Any]] = [
+    {
+        "candidate_id": "CF-001",
+        "factor_name": "短期过热回落强度",
+        "task_id": "TASK-240425-01",
+        "formula_key": "price_volume_reversal_v1",
+        "sample_window": "2024-01-01 ~ 2025-12-31",
+        "ic_mean": 0.043,
+        "ic_ir": 0.62,
+        "long_short_sharpe": 1.18,
+        "max_drawdown": -0.083,
+        "turnover": 0.31,
+        "orthogonality_score": 0.74,
+        "acceptance_gap": "通过",
+        "status": "approved",
+    },
+    {
+        "candidate_id": "CF-002",
+        "factor_name": "盘口失衡惯性",
+        "task_id": "TASK-240425-03",
+        "formula_key": "orderbook_imbalance_momentum_v1",
+        "sample_window": "2024-06-01 ~ 2025-12-31",
+        "ic_mean": 0.029,
+        "ic_ir": 0.39,
+        "long_short_sharpe": 0.82,
+        "max_drawdown": -0.117,
+        "turnover": 0.54,
+        "orthogonality_score": 0.69,
+        "acceptance_gap": "需降低换手",
+        "status": "pending_review",
+    },
+    {
+        "candidate_id": "CF-003",
+        "factor_name": "资金费率拥挤反转",
+        "task_id": "TASK-240425-02",
+        "formula_key": "funding_oi_crowding_v1",
+        "sample_window": "2024-01-01 ~ 2025-12-31",
+        "ic_mean": 0.051,
+        "ic_ir": 0.71,
+        "long_short_sharpe": 1.27,
+        "max_drawdown": -0.096,
+        "turnover": 0.35,
+        "orthogonality_score": 0.81,
+        "acceptance_gap": "缺 OI 字段",
+        "status": "blocked",
+    },
+]
+
+CANDIDATE_POOL_STATS: dict[str, Any] = {
+    "total_candidates": 36,
+    "approved": 6,
+    "pending_review": 18,
+    "blocked": 7,
+    "rejected": 5,
+    "coverage_ratio": 0.83,
+    "note": "主工作台显示精选样例，完整候选池共 36 条。",
+}
+
+FACTOR_LIBRARY: list[dict[str, Any]] = [
+    {
+        "factor_id": "LIB-2026-001",
+        "factor_name": "短期过热回落强度",
+        "factor_type": "价格-成交量",
+        "version": "1.0.0",
+        "tags": ["反转", "高频", "白名单公式"],
+        "quality_score": 87,
+        "lineage": "TASK-240425-01 -> CF-001 -> 审核通过",
+        "neutralization_profile": "strict_neutral",
+        "owner": "agent-alpha",
+        "library_status": "in_library",
+        "production_status": "paper",
+        "last_review_time": "2026-04-24 21:15:00",
+    },
+    {
+        "factor_id": "LIB-2026-002",
+        "factor_name": "中周期趋势拥挤修正",
+        "factor_type": "趋势-拥挤",
+        "version": "0.9.2",
+        "tags": ["趋势", "拥挤度", "观察中"],
+        "quality_score": 79,
+        "lineage": "历史因子迁移",
+        "neutralization_profile": "base_neutral",
+        "owner": "researcher-main",
+        "library_status": "in_monitoring",
+        "production_status": "live",
+        "last_review_time": "2026-04-25 09:30:00",
+    },
+]
+
+FACTOR_LIBRARY_TABLE: dict[str, Any] = {
+    "title": "因子库表（示例）",
+    "columns": [
+        "factor_id",
+        "factor_name",
+        "factor_type",
+        "quality_score",
+        "library_status",
+        "production_status",
+        "lineage",
+    ],
+    "total_rows": 24,
+    "new_this_week": 3,
+    "rows": FACTOR_LIBRARY,
+}
+
+DATA_MAP: list[dict[str, Any]] = [
+    {
+        "domain": "交易所行情",
+        "source": "Binance / Coinbase",
+        "core_fields": ["open", "high", "low", "close", "volume"],
+        "coverage": "BTC/ETH/SOL/BNB, 1m~1d",
+        "latency_level": "T+0",
+        "freshness": "2 min",
+        "status": "in_monitoring",
+        "note": "Binance 451 时自动回退 Coinbase。",
+    },
+    {
+        "domain": "衍生品数据",
+        "source": "Binance Futures",
+        "core_fields": ["funding_rate", "open_interest", "liquidation_volume"],
+        "coverage": "BTC/ETH 主流永续合约",
+        "latency_level": "T+0",
+        "freshness": "12 min",
+        "status": "blocked",
+        "note": "部分时段缺失 OI，影响拥挤类因子执行。",
+    },
+    {
+        "domain": "盘口微观结构",
+        "source": "交易所深度快照",
+        "core_fields": ["bid_ask_spread", "orderbook_bid_ask_ratio", "depth_5bp"],
+        "coverage": "BTC/ETH",
+        "latency_level": "T+0",
+        "freshness": "5 min",
+        "status": "running",
+        "note": "当前仅接入主交易对，需扩展至 SOL/BNB。",
+    },
+    {
+        "domain": "链上与情绪",
+        "source": "第三方聚合 API",
+        "core_fields": ["active_addresses", "tx_count", "social_sentiment"],
+        "coverage": "BTC/ETH",
+        "latency_level": "T+1",
+        "freshness": "4 h",
+        "status": "pending_review",
+        "note": "PIT 审计待补齐，暂不进入 live 策略。",
+    },
+]
+
+DATA_MAP_COVERAGE: dict[str, Any] = {
+    "exchange_count": 2,
+    "symbol_count": 4,
+    "domain_count": 4,
+    "core_field_count": 14,
+    "validated_ratio": 0.83,
+    "note": "覆盖数口径与任务字段可得性检查一致。",
+}
+
+MONITOR_ALERTS: list[dict[str, Any]] = [
+    {
+        "alert_id": "ALT-20260425-001",
+        "factor_id": "LIB-2026-002",
+        "factor_name": "中周期趋势拥挤修正",
+        "alert_type": "因子衰减",
+        "severity": "high",
+        "trigger_time": "2026-04-25 10:05:00",
+        "metric_name": "30d_ic_mean",
+        "current_value": 0.011,
+        "threshold": 0.02,
+        "status": "pending_review",
+        "suggestion": "触发重跑并检查市场状态分层表现。",
+    },
+    {
+        "alert_id": "ALT-20260425-002",
+        "factor_id": "LIB-2026-001",
+        "factor_name": "短期过热回落强度",
+        "alert_type": "数据缺口",
+        "severity": "medium",
+        "trigger_time": "2026-04-25 10:21:00",
+        "metric_name": "required_fields_completeness",
+        "current_value": 0.94,
+        "threshold": 0.98,
+        "status": "running",
+        "suggestion": "回补缺失 K 线并重算最近 24h 信号。",
+    },
+    {
+        "alert_id": "ALT-20260425-003",
+        "factor_id": "LIB-2026-002",
+        "factor_name": "中周期趋势拥挤修正",
+        "alert_type": "风格漂移",
+        "severity": "medium",
+        "trigger_time": "2026-04-25 11:02:00",
+        "metric_name": "beta_to_market",
+        "current_value": 0.63,
+        "threshold": 0.45,
+        "status": "agent_generating",
+        "suggestion": "建议追加中性化实验并更新风险标签。",
+    },
+]
+
+OVERVIEW_METRICS: list[dict[str, Any]] = [
+    {"metric": "任务进度", "value": "8/12", "delta": "+2"},
+    {"metric": "候选因子", "value": 36, "delta": "+8"},
+    {"metric": "数据验证", "value": "83%", "delta": "+5%"},
+    {"metric": "因子库总量", "value": 24, "delta": "+3"},
+]
+
+ACTIVE_AGENTS: list[dict[str, Any]] = [
+    {"agent_id": "agent-alpha", "role": "任务拆解", "status": "running", "queue_size": 3},
+    {"agent_id": "agent-beta", "role": "数据可得性检查", "status": "pending_review", "queue_size": 4},
+    {"agent_id": "agent-gamma", "role": "公式映射与验证", "status": "running", "queue_size": 2},
+]
+
+ICON_LIBRARY: list[dict[str, str]] = [
+    {"icon_key": "chat", "label": "对话", "emoji": "💬"},
+    {"icon_key": "agent_spark", "label": "Agent 闪光", "emoji": "✨"},
+    {"icon_key": "database", "label": "数据库", "emoji": "🗄️"},
+    {"icon_key": "formula_fx", "label": "公式 fx", "emoji": "🧠"},
+    {"icon_key": "lab", "label": "实验烧杯", "emoji": "🧪"},
+    {"icon_key": "line_chart", "label": "折线图", "emoji": "📈"},
+    {"icon_key": "backtest_clock", "label": "回测时钟", "emoji": "⏱️"},
+    {"icon_key": "risk_shield", "label": "风险盾牌", "emoji": "🛡️"},
+    {"icon_key": "alert_bell", "label": "告警铃", "emoji": "🔔"},
+    {"icon_key": "export_file", "label": "导出文件", "emoji": "📄"},
+    {"icon_key": "settings", "label": "设置齿轮", "emoji": "⚙️"},
+    {"icon_key": "run", "label": "运行", "emoji": "▶️"},
+    {"icon_key": "pause", "label": "暂停", "emoji": "⏸️"},
+    {"icon_key": "rerun", "label": "重跑", "emoji": "🔁"},
+    {"icon_key": "approve", "label": "审核通过", "emoji": "✅"},
+    {"icon_key": "reject", "label": "审核拒绝", "emoji": "⛔"},
+    {"icon_key": "favorite", "label": "收藏星标", "emoji": "⭐"},
+    {"icon_key": "filter", "label": "筛选漏斗", "emoji": "🧰"},
+    {"icon_key": "lineage", "label": "因子谱系", "emoji": "🌿"},
+]
+
+FONT_SPEC: dict[str, str] = {
+    "title_font": "Noto Sans SC Heavy / 圆润黑体",
+    "body_font": "Noto Sans SC Regular",
+    "number_font": "JetBrains Mono / Consolas",
+    "style_note": "保持浅色、圆角、治愈系研究助理工作台风格。",
+}
+
+NEXT_SYSTEM_PROMPTS: list[dict[str, str]] = [
+    {
+        "prompt_id": "SYS-001",
+        "title": "补齐衍生品字段",
+        "trigger": "资金费率或 OI 任务 blocked 超过 4h",
+        "message": "请优先补齐 open_interest 与 liquidation_volume 后再重跑拥挤类因子。",
+    },
+    {
+        "prompt_id": "SYS-002",
+        "title": "进入人工审核",
+        "trigger": "候选因子达到验收线且样本内外一致",
+        "message": "请研究员对通过候选执行人工审核，确认是否入库或加入组合。",
+    },
+    {
+        "prompt_id": "SYS-003",
+        "title": "监控迭代提醒",
+        "trigger": "30d IC 均值低于阈值或风格漂移触发",
+        "message": "请发起重跑并补充中性化对照实验，更新风险标签与报告。",
+    },
+]
+
+
+def get_status_catalog() -> dict[str, dict[str, Any]]:
+    return deepcopy(STATUS_CATALOG)
+
+
+def get_workflow_steps() -> list[dict[str, Any]]:
+    return deepcopy(WORKFLOW_STEPS)
+
+
+def get_agent_workspace_seed() -> dict[str, Any]:
+    return {
+        "status_catalog": deepcopy(STATUS_CATALOG),
+        "top_status_chips": deepcopy(TOP_STATUS_CHIPS),
+        "workflow_steps": deepcopy(WORKFLOW_STEPS),
+        "research_objective": deepcopy(RESEARCH_OBJECTIVE),
+        "task_breakdown": deepcopy(TASK_BREAKDOWN),
+        "candidate_factors": deepcopy(CANDIDATE_FACTORS),
+        "candidate_pool_stats": deepcopy(CANDIDATE_POOL_STATS),
+        "factor_library": deepcopy(FACTOR_LIBRARY),
+        "factor_library_table": deepcopy(FACTOR_LIBRARY_TABLE),
+        "data_map": deepcopy(DATA_MAP),
+        "data_map_coverage": deepcopy(DATA_MAP_COVERAGE),
+        "monitor_alerts": deepcopy(MONITOR_ALERTS),
+        "overview_metrics": deepcopy(OVERVIEW_METRICS),
+        "active_agents": deepcopy(ACTIVE_AGENTS),
+        "icon_library": deepcopy(ICON_LIBRARY),
+        "font_spec": deepcopy(FONT_SPEC),
+        "next_system_prompts": deepcopy(NEXT_SYSTEM_PROMPTS),
+    }
+
+
+def get_page_seed_data(page_key: str) -> Any:
+    page_to_data: dict[str, Any] = {
+        "总览驾驶舱": {
+            "overview_metrics": OVERVIEW_METRICS,
+            "top_status_chips": TOP_STATUS_CHIPS,
+            "active_agents": ACTIVE_AGENTS,
+            "workflow_steps": WORKFLOW_STEPS,
+            "monitor_alerts": MONITOR_ALERTS,
+            "candidate_pool_stats": CANDIDATE_POOL_STATS,
+            "data_map_coverage": DATA_MAP_COVERAGE,
+        },
+        "Agent 挖因子": {
+            "research_objective": RESEARCH_OBJECTIVE,
+            "task_breakdown": TASK_BREAKDOWN,
+            "candidate_factors": CANDIDATE_FACTORS,
+            "workflow_steps": WORKFLOW_STEPS,
+            "top_status_chips": TOP_STATUS_CHIPS,
+            "candidate_pool_stats": CANDIDATE_POOL_STATS,
+            "next_system_prompts": NEXT_SYSTEM_PROMPTS,
+        },
+        "因子实验室": {
+            "task_breakdown": TASK_BREAKDOWN,
+            "candidate_factors": CANDIDATE_FACTORS,
+            "status_catalog": STATUS_CATALOG,
+            "icon_library": ICON_LIBRARY,
+            "font_spec": FONT_SPEC,
+        },
+        "回测与归因": {
+            "candidate_factors": CANDIDATE_FACTORS,
+            "workflow_steps": WORKFLOW_STEPS,
+            "candidate_pool_stats": CANDIDATE_POOL_STATS,
+        },
+        "因子库": {
+            "factor_library": FACTOR_LIBRARY,
+            "factor_library_table": FACTOR_LIBRARY_TABLE,
+            "status_catalog": STATUS_CATALOG,
+        },
+        "数据地图": {
+            "data_map": DATA_MAP,
+            "data_map_coverage": DATA_MAP_COVERAGE,
+            "status_catalog": STATUS_CATALOG,
+        },
+        "组合工作台": {
+            "factor_library": FACTOR_LIBRARY,
+            "monitor_alerts": MONITOR_ALERTS,
+            "top_status_chips": TOP_STATUS_CHIPS,
+        },
+        "报告中心": {
+            "research_objective": RESEARCH_OBJECTIVE,
+            "candidate_factors": CANDIDATE_FACTORS,
+            "factor_library": FACTOR_LIBRARY,
+            "next_system_prompts": NEXT_SYSTEM_PROMPTS,
+        },
+        "监控与告警": {
+            "monitor_alerts": MONITOR_ALERTS,
+            "factor_library": FACTOR_LIBRARY,
+            "status_catalog": STATUS_CATALOG,
+            "next_system_prompts": NEXT_SYSTEM_PROMPTS,
+        },
+        "设置": {
+            "status_catalog": STATUS_CATALOG,
+            "active_agents": ACTIVE_AGENTS,
+            "icon_library": ICON_LIBRARY,
+            "font_spec": FONT_SPEC,
+        },
+    }
+    return deepcopy(page_to_data.get(page_key, {}))
+
+
+__all__ = [
+    "STATUS_CATALOG",
+    "TOP_STATUS_CHIPS",
+    "WORKFLOW_STEPS",
+    "RESEARCH_OBJECTIVE",
+    "TASK_BREAKDOWN",
+    "CANDIDATE_FACTORS",
+    "CANDIDATE_POOL_STATS",
+    "FACTOR_LIBRARY",
+    "FACTOR_LIBRARY_TABLE",
+    "DATA_MAP",
+    "DATA_MAP_COVERAGE",
+    "MONITOR_ALERTS",
+    "OVERVIEW_METRICS",
+    "ACTIVE_AGENTS",
+    "ICON_LIBRARY",
+    "FONT_SPEC",
+    "NEXT_SYSTEM_PROMPTS",
+    "get_status_catalog",
+    "get_workflow_steps",
+    "get_agent_workspace_seed",
+    "get_page_seed_data",
+]

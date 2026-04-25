@@ -1,0 +1,53 @@
+acceptance_rule_version: v0.1
+decision_statuses:
+  - rejected
+  - watchlist
+  - research_pass
+
+thresholds:
+  rank_ic_mean_min: 0.02
+  rank_ic_tstat_min: 2.0
+  ic_positive_ratio_min: 0.55
+  coverage_ratio_min: 0.70
+  cost_adjusted_return_min: 0.0
+  turnover_max: 1.50
+
+profile_priority:
+  - strict_neutral
+  - within_category
+  - base_neutral
+  - raw
+
+risk_flags:
+  data_quality_flags:
+    - missing_rate_high
+    - stale_price_detected
+    - suspicious_volume
+    - insufficient_history
+    - possible_delisting_bias
+    - category_sample_too_small
+  lookahead_flags:
+    - uses_current_universe
+    - uses_future_volume
+    - category_effective_time_missing
+    - funding_time_ambiguous
+  implementation_flags:
+    - high_turnover
+    - low_capacity
+    - requires_shorting
+    - perp_only
+    - funding_cost_sensitive
+
+decision_logic:
+  research_pass:
+    require_any_passed_profiles:
+      - strict_neutral
+      - within_category
+      - base_neutral
+    require_cost_adjusted_return_positive: true
+  watchlist:
+    require_any_passed_profiles:
+      - raw
+      - base_neutral
+  rejected:
+    default_if_no_rule_matched: true

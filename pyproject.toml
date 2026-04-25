@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "factor-research"
+version = "0.1.0"
+description = "Crypto factor research v1 demo"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "pandas>=2.0",
+  "numpy>=1.24",
+  "pyyaml>=6.0",
+  "duckdb>=1.0",
+  "streamlit>=1.30",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

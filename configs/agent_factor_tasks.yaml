@@ -1,0 +1,65 @@
+tasks:
+  - task_id: task_close_mom_001
+    factor_name: close_momentum_w24
+    hypothesis: 价格在过去窗口期持续上涨，短期仍可能延续。
+    required_fields:
+      - close
+    formula_draft: log(close / close.shift(window))
+    formula_key: close_momentum
+    formula_params:
+      window: 24
+    direction: positive
+    horizons:
+      - 8
+      - 24
+    neutralization_profile:
+      - raw
+      - base_neutral
+      - strict_neutral
+      - within_category
+    risk_checks:
+      - lookahead_guard
+      - min_sample_guard
+    acceptance_rule_version: v0.1
+    status: approved
+
+  - task_id: task_volume_z_002
+    factor_name: volume_zscore_w36
+    hypothesis: 成交量异常放大后，短期价格可能回归。
+    required_fields:
+      - close
+      - volume
+    formula_draft: zscore(volume, rolling_window=window)
+    formula_key: volume_zscore
+    formula_params:
+      window: 36
+    direction: negative
+    horizons:
+      - 8
+    neutralization_profile:
+      - raw
+      - base_neutral
+    risk_checks:
+      - liquidity_guard
+    acceptance_rule_version: v0.1
+    status: draft
+
+  - task_id: task_missing_field_003
+    factor_name: missing_funding_probe
+    hypothesis: funding_rate 拥挤时可能触发回撤。
+    required_fields:
+      - close
+      - funding_rate
+    formula_draft: std(pct_change(close), window)
+    formula_key: volatility
+    formula_params:
+      window: 24
+    direction: positive
+    horizons:
+      - 8
+    neutralization_profile:
+      - raw
+    risk_checks:
+      - data_availability
+    acceptance_rule_version: v0.1
+    status: approved
